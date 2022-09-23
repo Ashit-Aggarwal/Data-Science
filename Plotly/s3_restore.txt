@@ -1,0 +1,134 @@
+import boto3
+import datetime
+import pytz
+
+utc=pytz.UTC
+
+#a function that will restore objects which have been delted into a new folder in the same path
+def restore_deleted_objects(execute_restore=False,
+                            bucket_name = 'bucket-eu-west-1-787511913082-risk-models-user',
+                            prefix = 'teams/credit_irb_modelling/retail_irb/uk_mortgage_lgd/03. Data/01. Raw Datasets',
+                            datetime_search_start = utc.localize(datetime.datetime(2020, 9, 6,23,59,59)),
+                            datetime_search_end = utc.localize(datetime.datetime(2020, 9, 7,23,59,59))
+                           ):
+    utc=pytz.UTC
+
+    s3 = boto3.client('s3')
+
+    #initialise a list of delete marker and list of object versions of those deleted objects
+    list_of_markers_of_interest = []
+    list_of_objects_of_interest = []
+    list_of_objects_to_restore = []
+
+    #paginate through the results of the list object versions API
+    paginator = s3.get_paginator('list_object_versions')
+
+    #put in the bucket name and the prefix to look in
+    response_iterator = paginator.paginate(
+        Bucket=bucket_name,
+        Prefix=prefix
+    )
+
+    #find all the delete markers from the time everything was deleted
+    for response in response_iterator:
+        if 'DeleteMarkers' in response:
+            for marker in response['DeleteMarkers']:
+                if marker['LastModified'] > datetime_search_start and marker['LastModified'] < datetime_search_end:
+                    list_of_markers_of_interest.append(marker)
+                    #print('| IsLatest:',marker['IsLatest'],'| LastModified:',marker['LastModified'],'| VersionId:',marker['VersionId'],'| (Delete Marker)','|', marker['Key'][len("teams/credit_irb_modelling/retail_irb/uk_mortgage_lgd/03. Data/01. Raw Datasets"):])
+
+
+    print('Delete Markers found for time range:')
+    print('Deleted at | Object Name')
+    
+    for marker in list_of_markers_of_interest:
+        print(marker['LastModified'], ' | ', marker['Key'][len(prefix):])
+
+    #paginate through the results of the list object versions API
+    paginator = s3.get_paginator('list_object_versions')
+
+    #put in the bucket name and the prefix to look in
+    response_iterator = paginator.paginate(
+        Bucket=bucket_name,
+        Prefix=prefix
+    )
+
+    #look again and get the list of all versions of the files which have delete markers of interest
+    for response in response_iterator:        
+        for version in response['Versions']:
+            #see if the key is in the list of keys in th markers of interest list and the modfiied date is earlier than the deletion
+            for marker in list_of_markers_of_interest:
+                if version['Key'] == marker['Key'] and version['LastModified'] <= marker['LastModified']:
+                    version.update(MarkerVersionId = marker['VersionId'])
+                    list_of_objects_of_interest.append(version)
+
+    #sort the list of objects by key and date
+    sorted_list_of_objects_of_interest = sorted(list_of_objects_of_interest, key=lambda k: (k['Key'], k['LastModified']), reverse=True)
+
+    #we are going to check eachkey agains the last inthe list so we can take only the first (latest) key
+    last_obj_key = ''
+
+    print('Latest objects found for delete markers:')
+    print('Modified at | Object Name (Version Id)')
+    
+    for obj in sorted_list_of_objects_of_interest:
+
+        taking_this_one = False
+        if obj['Key'] != last_obj_key:
+            taking_this_one = True
+            #add this one to the list to restore as it is the newest before the deletion
+            list_of_objects_to_restore.append(obj)
+                    
+            #print out a list
+            print(obj['LastModified'], ' | ', obj['Key'][len(prefix):], '(' + obj['VersionId'] + ')')
+
+        #keep the oject name for the next iteration
+        last_obj_key = obj['Key']
+
+    #now copy the object version to a folder called restored
+    datetime_now = datetime.datetime.now()
+    datetime_now_str = datetime_now.strftime("%d%b%Y%H%M%S")
+
+    for obj in list_of_objects_to_restore:  
+
+        #create the s3 resource
+        s3res = boto3.resource('s3')
+
+        #store the key
+        object_key = obj['Key']
+
+        #set up the source configuration
+        copy_source = {
+            'Bucket': bucket_name,
+            'Key': object_key, 
+            'VersionId': obj['VersionId']
+        }
+
+        #target prefix needs to have the restored_DDMMYYHHMMSS added
+        target_key = object_key.replace(prefix, prefix + '/restored_' + datetime_now_str)
+
+        #print out a report before 
+        print('Will copy: ', object_key, '(' + obj['VersionId'] + ')')
+        print('To: ', target_key)
+            
+        #execute the copy if requested
+        if execute_restore:
+            try:
+                #copy the object to the target location
+                s3res.meta.client.copy(copy_source, bucket_name, target_key)
+
+                #print out a report
+                print('Copied: ', object_key, '(' + obj['VersionId'] + ')')
+                print('To: ', target_key)
+                
+            except Exception as e:
+                print(e)
+                raise
+
+restore_deleted_objects(execute_restore=True,
+                        bucket_name = 'bucket-eu-west-1-787511913082-support-user',
+                        prefix = 'PeterZ',
+                        datetime_search_start = utc.localize(datetime.datetime(2020, 9, 7,23,59,59)),
+                        datetime_search_end = utc.localize(datetime.datetime(2020, 9, 8,23,59,59))
+                       )
+
